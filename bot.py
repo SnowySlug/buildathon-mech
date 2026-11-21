@@ -2,10 +2,11 @@
 
 import math
 import random
-import gc
 import time
+import gc
 import mechfight as mf
 from navigation import World
+from ballistics import solve,arc_clear
 
 TAU=2*math.pi
 
@@ -37,7 +38,7 @@ def intercept(origin,target,velocity,speed):
 
 
 class Bot:
-    name="Snowy-Hybrid-v6"
+    name="Snowy-Artillery-v7"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -59,11 +60,7 @@ class Bot:
         self.healing=False
         self.last_hurt=-100
         self.last_dealt=-100
-        # Runtime observations/actions and bounded memories are acyclic and
-        # released by reference counting. Move full-heap GC work into hello,
-        # rather than allowing an occasional scan inside a50ms decision.
-        gc.collect()
-        gc.disable()
+        gc.collect();gc.disable()
 
     def secondary(self,me):
         return next((weapon for weapon in me["weapons"] if weapon and weapon["kind"]!="gun"),None)
@@ -96,8 +93,8 @@ class Bot:
                   "reactor":8,"gun_velocity":8.5,"gun_damage":10,"gun_rate":9.5,
                   "gun_mag":9,"laser_damage":9,"laser_charge":8.5,
                   "lightning_range":11,"lightning_efficiency":10,"gyros":6,
-                  "sensors":4,"capacitor":5,"mortar_reload":6,"mortar_velocity":5,
-                  "mortar_splash":6,"laser_pierce":4,"lightning_chain":8}
+                  "sensors":4,"capacitor":5,"mortar_reload":11,"mortar_velocity":9.5,
+                  "mortar_splash":10.5,"laser_pierce":4,"lightning_chain":8}
         if me["hp"]<.5*me["max_hp"]:priority["nanites"]=10.5
         return max(range(len(offer["choices"])),key=lambda i:priority.get(offer["choices"][i]["id"],3))
 
@@ -158,13 +155,7 @@ class Bot:
                 (outside_next>0 and zone["shrink_end"]-obs["t"]<outside_next/me["stats"].get("walk_speed",11.7)+9))
         self.combat_target=None
         if urgent:return self.retreat_goal(obs,enemies)
-        # Observations retain real positions for5s behind cover. Such a tracked
-        # mech is not automatically an active crossfire source.
-        nearby=[]
-        for enemy in enemies:
-            if math.dist(enemy["pos"][:2],(x,y))<145:
-                muzzle=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+self.config["mech"].get("muzzle_height",7)]
-                if self.world.clear_ray(muzzle,[x,y,z+me["stats"].get("height",9)*.5]) is not False:nearby.append(enemy)
+        nearby=[enemy for enemy in enemies if math.dist(enemy["pos"][:2],(x,y))<145]
         target=min(enemies,key=lambda enemy:self.target_score(enemy,me)) if enemies else None
         if target and math.dist(target["pos"][:2],(x,y))>220:target=None
         # Healing is an explicit break from combat, not an automatic HP gate
@@ -185,11 +176,11 @@ class Bot:
                 danger=sum(max(0,60-math.dist(enemy["pos"][:2],cube["pos"][:2])) for enemy in nearby)
                 resources.append((d*.35+danger*.8,cube["pos"][:2]))
         current_secondary=self.secondary(me)
-        if current_secondary is None or current_secondary["kind"]!="lightning":
-            weights={"lightning":.45,"mortar":.7,"laser":.85}
+        if current_secondary is None or current_secondary["kind"]!="mortar":
+            weights={"lightning":.7,"mortar":.4,"laser":.85}
             for pickup,_ in self.loot_memory.values():
                 d=math.dist(pickup["pos"][:2],(x,y))
-                permitted=current_secondary is None or pickup["kind"]=="lightning"
+                permitted=current_secondary is None or pickup["kind"]=="mortar"
                 distance_limit=135 if current_secondary is None else 70
                 if permitted and pickup["kind"] in weights and d<distance_limit and abs(pickup["pos"][2]-z)<5:
                     if math.dist(pickup["pos"][:2],zone["next_center"])<margin:
@@ -201,10 +192,8 @@ class Bot:
         if target:
             weapon=self.secondary(me)
             kind=weapon["kind"] if weapon else "gun"
-            desired=58 if kind=="mortar" else 105 if kind=="laser" else 76
-            if kind=="lightning" and (me["energy"]>=9 or target.get("hp",1400)<=180):
-                reach=weapon["stats"].get("range",45)
-                desired=max(18,min(reach-4,reach*.9))
+            desired=34 if kind=="lightning" and me["energy"]>=9 else 92 if kind=="mortar" else 105 if kind=="laser" else 76
+            if kind=="lightning":desired=min(desired,weapon["stats"].get("range",45)*.8)
             if len(nearby)>=3:desired=max(desired,90)
             if target.get("hp",1400)<260 and len(nearby)<=2:desired=min(desired,42)
             self.combat_target=target;self.combat_range=desired
@@ -253,10 +242,6 @@ class Bot:
         weapon=self.secondary(me)
         if duel and weapon and weapon["kind"]=="lightning":
             boost=me["energy"]>65 and math.dist(duel["pos"][:2],(x,y))>self.combat_range+25
-        if weapon and weapon["kind"]=="lightning" and nearest<weapon["stats"].get("range",45)+10 and me["in_zone"]:
-            # Also applies while approaching a cube/weapon resource goal,
-            # when combat_target may deliberately be unset.
-            boost=False
         if not me["in_zone"]:boost=me["energy"]>8
         speed=stats.get("boost_speed",19.5) if boost else stats.get("walk_speed",11.7)
         if math.dist((x,y),waypoint)<3 and nearest>110:
@@ -314,12 +299,25 @@ class Bot:
         me=obs["self"];x,y,z=me["pos"];stats=me["stats"]
         origin=[x,y,z+stats.get("muzzle_height",7)]
         targets=[]
+        mortar=next((w for w in me["weapons"] if w and w["kind"]=="mortar"),None)
+        mortar_solutions={};direct_visible=set()
         regen=self.healing
-        for enemy in sorted(enemies,key=lambda enemy:self.target_score(enemy,me)):
+        for rank,enemy in enumerate(sorted(enemies,key=lambda enemy:self.target_score(enemy,me))):
             distance=math.dist(enemy["pos"][:2],(x,y))
             if distance>290 or (regen and distance>85):continue
             center=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+4.5*(1+.05*enemy.get("cubes",0))]
-            if self.world.clear_ray(origin,center):
+            clear=self.world.clear_ray(origin,center) is True
+            if clear:direct_visible.add(enemy["id"])
+            if mortar and rank<3 and 22<distance<300:
+                ws=mortar["stats"]
+                # A low-body impact catches ground movers with splash; retain
+                # observed vertical velocity for airborne targets.
+                impact=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+.8]
+                solution=solve(origin,impact,enemy.get("vel",[0,0,0]),ws.get("speed",72),
+                               ws.get("gravity",22),ws.get("ttl",7),stats.get("min_pitch",-.7),stats.get("max_pitch",1.3))
+                if solution and arc_clear(self.world,origin,*solution[:2],ws.get("speed",72),ws.get("gravity",22),solution[2]):
+                    mortar_solutions[enemy["id"]]=solution
+            if clear or enemy["id"] in mortar_solutions:
                 score=self.target_score(enemy,me)
                 if enemy.get("charging"):score-=20
                 targets.append((score,enemy,center))
@@ -355,25 +353,18 @@ class Bot:
         pitch=None
         if secondary:
             slot,weapon=secondary;kind=weapon["kind"];ws=weapon["stats"]
+            if kind=="mortar" and target["id"] not in mortar_solutions and target.get("kind")!="mech" and distance>22:
+                solution=solve(origin,[center[0],center[1],target["pos"][2]+.8],velocity,
+                               ws.get("speed",72),ws.get("gravity",22),ws.get("ttl",7),
+                               stats.get("min_pitch",-.7),stats.get("max_pitch",1.3))
+                if solution and arc_clear(self.world,origin,*solution[:2],ws.get("speed",72),ws.get("gravity",22),solution[2]):
+                    mortar_solutions[target["id"]]=solution
             if kind=="laser" and distance<ws.get("range",280) and (weapon.get("charge",0)>0 or weapon["cooldown"]<=.05):
                 primary="laser";aimpoint=center
-            elif kind=="lightning" and distance<ws.get("range",45):
-                # Its yaw cone easily tolerates normal gun lead. Center aim
-                # wastes the gun against a transverse target at longer ranges.
-                primary="lightning";aimpoint=gunpoint
-            elif kind=="mortar" and 27<distance<230 and weapon["cooldown"]<=.05:
-                speed=ws.get("speed",72);gravity=ws.get("gravity",22)
-                mortar_origin=[x,y,z+stats.get("height",9)+.5]
-                point=center[:]
-                for _ in range(3):
-                    horizontal=math.dist(point[:2],(x,y));rise=point[2]-mortar_origin[2]
-                    disc=speed**4-gravity*(gravity*horizontal**2+2*rise*speed**2)
-                    if disc<0:break
-                    pitch=math.atan2(speed*speed-math.sqrt(disc),gravity*max(horizontal,.01))
-                    flight=horizontal/(speed*math.cos(pitch))
-                    point=[center[i]+velocity[i]*flight for i in range(3)]
-                if pitch is not None and stats.get("min_pitch",-.7)<=pitch<=stats.get("max_pitch",1.3):
-                    primary="mortar";aimpoint=point
+            elif kind=="lightning" and distance<ws.get("range",45):primary="lightning";aimpoint=center
+            elif kind=="mortar" and target["id"] in mortar_solutions and weapon["cooldown"]<=.2:
+                mortar_yaw,pitch,_=mortar_solutions[target["id"]]
+                primary="mortar";aimpoint=[x+math.cos(mortar_yaw)*distance,y+math.sin(mortar_yaw)*distance,0]
         yaw=math.atan2(aimpoint[1]-y,aimpoint[0]-x)
         pitch=(math.atan2(aimpoint[2]-origin[2],math.dist(aimpoint[:2],(x,y))) if primary!="mortar" else pitch)
         pitch=max(stats.get("min_pitch",-.7),min(stats.get("max_pitch",1.3),pitch))
@@ -390,16 +381,18 @@ class Bot:
                 gun_yaw=math.atan2(gunpoint[1]-y,gunpoint[0]-x)
                 gun_pitch=math.atan2(gunpoint[2]-origin[2],math.dist(gunpoint[:2],(x,y)))
                 gun_aligned=abs(angle_delta(gun_yaw,me["aim"][0]))<tolerance and abs(gun_pitch-me["aim"][1])<tolerance*1.5
-                fire[i]=distance<ws.get("range",230) and gun_aligned
+                fire[i]=distance<ws.get("range",230) and gun_aligned and (target.get("kind")!="mech" or target["id"] in direct_visible)
                 reload=weapon.get("ammo",0)<=0
             elif kind=="laser":
                 charge=weapon.get("charge",0)
                 fire[i]=primary=="laser" and (charge<ws.get("charge",.75) or not aligned)
             elif kind=="lightning":
-                arc_yaw=math.atan2(center[1]-y,center[0]-x)
-                arc_error=abs(angle_delta(arc_yaw,me["aim"][0]))
-                fire[i]=distance<ws.get("range",45) and arc_error<math.radians(ws.get("cone_deg",30))*.45 and me["energy"]>=ws.get("energy",3)
-            elif kind=="mortar":fire[i]=primary=="mortar" and aligned
+                fire[i]=distance<ws.get("range",45) and error_yaw<math.radians(ws.get("cone_deg",30))*.45 and me["energy"]>=ws.get("energy",3)
+            elif kind=="mortar":
+                # Splash tolerates a larger angular error than the gun's body
+                # radius, but keep it below half the blast footprint.
+                mortar_tolerance=max(tolerance,math.atan2(ws.get("splash_radius",7)*.45,max(distance,1)))
+                fire[i]=primary=="mortar" and error_yaw<mortar_tolerance and error_pitch<mortar_tolerance
         return [yaw,pitch],fire,reload
 
     def act(self,obs):
@@ -410,15 +403,15 @@ class Bot:
         if self.combat_target:
             self.combat_target=next((enemy for enemy in enemies if enemy["id"]==self.combat_target["id"]),self.combat_target)
         movement,boost,jump=self.move(obs,enemies)
-        self.world.geometry_deadline=time.process_time()+.006
+        self.world.geometry_deadline=time.process_time()+.009
         aim,fire,reload=self.aim_fire(obs,enemies)
         if enemies and self.world.expired():reload=False
         self.world.geometry_deadline=None
         act={"tick":obs["tick"],"move":movement,"aim":aim,"boost":boost,"jump":jump,"fire":fire,"reload":reload}
         if obs.get("offer"):act["pick"]=self.choose_upgrade(obs["offer"],me)
-        for pickup in sorted(obs["pickups"],key=lambda p:math.dist(p["pos"][:2],me["pos"][:2])+{"lightning":0,"mortar":3,"laser":6,"gun":100}.get(p["kind"],100)):
+        for pickup in sorted(obs["pickups"],key=lambda p:math.dist(p["pos"][:2],me["pos"][:2])+{"mortar":0,"lightning":3,"laser":6,"gun":100}.get(p["kind"],100)):
             secondary=self.secondary(me)
-            swap=bool(secondary and secondary["kind"]!="lightning" and pickup["kind"]=="lightning" and not secondary.get("charge",0))
+            swap=bool(secondary and secondary["kind"]!="mortar" and pickup["kind"]=="mortar" and not secondary.get("charge",0))
             if (me["weapons"][1] is None or swap) and pickup["kind"]!="gun":
                 if math.dist(pickup["pos"][:2],me["pos"][:2])<=self.config["loot"]["pickup_radius"] and abs(pickup["pos"][2]-me["pos"][2])<=4:
                     act["take"]=pickup["id"]

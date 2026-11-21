@@ -1,51 +1,51 @@
-# Snowy Hybrid v6
+# Snowy Artillery v7
 
-An offensive Mech Royale experiment derived from Snowy Assault v5. V5 received
-4.00 official practice placement points. V6 has no measured gameplay score yet.
+An independent mortar-counter-brawler hypothesis derived from Assault v5
+(official practice placement4.00). Artillery v7 gameplay strength is unmeasured.
 
-The hypothesis is that a lightning/gun hybrid should use its range upgrades,
-align both weapons with one compatible aim, and preserve energy for arc shots.
-The official protocol gives lightning45m range, a30-degree yaw cone,3energy
-per shot and a0.25s cooldown; weapon stats include applied upgrades.
+Official rules make mortar a lightning counter: a direct hit deals200 damage
+plus160 splash, with energy drain up to45 and knockback. It costs no firing
+energy and can strike beyond lightning's45m default range. The hypothesis is
+that these effects and splash against a coordinated squad outweigh slower shell
+travel and aiming risk.
 
-Changes from V5:
+Behavior changes:
 
-- Use90% of current lightning range, capped4m inside its boundary, rather than
-  keeping a fixed34m orbit after range upgrades. With54m range this gives48.6m,
-  beyond a default45m enemy arc. With depleted energy use gun standoff unless
-  finishing a weak enemy.
-- Lead the gun while firing lightning. The arc checks the current target yaw
-  independently, allowing both weapons against transverse moving targets.
-- Preserve arc energy while approaching resources as well as during a duel.
-- Count nearby tracked enemies as crossfire threats when their incoming line
-  of sight is clear or unknown. Known occluded enemies do not force the90m
-  crowd-retreat distance merely because the protocol tracks them behind cover.
-- Apply soft CPU deadlines to legacy navigation and geometric checks. Budget
-  exhaustion produces unknown line of sight: it authorizes neither firing nor
-  claims of safe cover. A* returns its best partial route. The map/path/ray
-  algorithms otherwise remain those of V5. Collect cyclic garbage during
-  initialization, leaving acyclic runtime data to reference counting.
+- Prefer mortar pickups, retaining the gun; orbit approximately92m away instead
+  of v5's58m mortar standoff. Prioritize mortar cooldown and splash upgrades.
+- Solve a constant-velocity ballistic interception quartic numerically using
+  the published speed, gravity, muzzle height and actual upgraded weapon stats.
+  Target the lower body to retain a ground-splash opportunity on a near miss.
+- Test short chords along the curved shell flight. A tracked enemy behind low
+  cover remains a mortar candidate when the shell trajectory is clear. Direct
+  gunfire requires a clear direct ray. Unknown clearance never authorizes fire.
+- Allow aiming shortly before mortar cooldown ends and use a conservative
+  fraction of splash radius for firing tolerance.
+- Preserve v5 behavior without a mortar. Retain its ground navigation with soft
+  CPU work limits and conservative handling of unknown geometry. No roof policy
+  or v6 wider Lightning orbit is included.
 
-Validation:17 local tests pass. The official recorded checker passed300
-observations:299timely,1late, no stale/wrong-tick/bad actions; p9928.6ms,
-max77.5ms. The checker and bot share the same one-CPU container. Direct bot
-computation on those300 recorded observations reached3.29ms CPU/3.29ms wall.
-A separate32-ground-pose test with15 tracked enemies reached26.88ms CPU,
-26.91ms wall and24.7MiB peak RSS after bounding work (previously152ms CPU).
-These are conformance and latency measurements, not reactive gameplay tests.
+Validation:11 tests cover analytic stationary/moving ballistic intersections,
+unreachable/pitch-limited shots, low-wall arcs, unknown clearance, blocked gunfire,
+mortar standoff, upgrades and safe weapon swaps. Official recorded checker:
+300/300timely,0late/stale/bad/wrong-tick actions, p9912.0ms,max35.0ms. Direct
+recorded300-observation computation reached13.06ms CPU/wall. A separate public
+map32-ground-pose/15-foe stress test reached10.88ms CPU/wall and24.6MiB peak RSS.
+These measurements validate protocol and latency, not responsive gameplay.
 
-Risks: wider orbit can reduce arc uptime; enemy upgrades are not fully visible;
-an occluded enemy can emerge quickly; budget exhaustion can miss a firing or
-movement opportunity. The legacy geometry remains approximate. Final opponents
-are competing bots rather than the coordinated practice house squad. Only an
-official evaluation can establish whether V6 improves placement.
+Limitations: constant-velocity prediction misses turns and collisions; the
+low/earliest arc cannot clear every building; geometric chord/map tests remain
+approximate. The protocol does not specify a separate mortar spawn-height
+offset, so this bot uses the documented upgraded muzzle height. Gun and mortar
+often need different pitch, limiting simultaneous fire. Wider standoff can
+delay cube pickup. The final free-for-all differs from the practice squad.
+Only official scoring can establish whether this experiment improves placement.
 
-Publish these seven files at repository root: Dockerfile,.dockerignore,bot.py,
-navigation.py,mechfight.py,README.md,LICENSE. No package installs or arena data
-are required in the image; the scorer mounts /arena. Runtime is unprivileged,
-offline, read-only Linux/amd64 with1CPU,512MiB RAM and64MiB temporary space.
+Publish eight files at repository root: Dockerfile,.dockerignore,bot.py,
+navigation.py,ballistics.py,mechfight.py,README.md,LICENSE. Standard library only;
+no package installation or arena data in the image. Scorer supplies /arena.
 
-MIT licensed. The protocol wrapper derives from the organizer kit with
-fail-fast initialization. Bot/navigation code was built with AI assistance
-during the event. Official protocol/map/checker:
+MIT licensed. Wrapper derives from the organizer kit with fail-fast startup;
+our bot/navigation/ballistics code was built with AI assistance during the event.
+Official rules and starter kit:
 https://www.joinbuilders.org/buildathon/tracks/builders .
