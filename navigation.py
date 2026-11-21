@@ -106,7 +106,7 @@ class World:
                 return best[1]
         return n
 
-    def path(self, position, goal, limit=2200):
+    def path(self, position, goal, limit=2200, threats=()):
         start = self.nearest_free(self.cell(*position[:2]))
         finish = self.nearest_free(self.cell(*goal[:2]))
         fi,fj = finish%self.nx,finish//self.nx
@@ -116,6 +116,13 @@ class World:
         costs, parents = {start:0}, {}
         best = start
         visited = 0
+        danger_cache={}
+        threats=tuple(threats)[:5]
+        def danger(n):
+            if n not in danger_cache:
+                x,y=self.point(n)
+                danger_cache[n]=sum(15*max(0,1-math.hypot(x-e[0],y-e[1])/190)**2 for e in threats)
+            return danger_cache[n]
         while heap and visited < limit:
             _,cost,n = heapq.heappop(heap)
             if cost != costs[n]:
@@ -140,7 +147,7 @@ class World:
                 rise=self.ground[q]-self.ground[n]
                 if rise>self.step*length*1.1:
                     continue
-                nc=cost+length+max(0,rise)*.025
+                nc=cost+length*(1+danger(q))+max(0,rise)*.025
                 if nc<costs.get(q,math.inf):
                     costs[q]=nc;parents[q]=n
                     heapq.heappush(heap,(nc+heuristic(q),nc,q))

@@ -35,7 +35,7 @@ def intercept(origin,target,velocity,speed):
 
 
 class Bot:
-    name="Snowy-Survivor-v1"
+    name="Snowy-Escape-v2"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -48,6 +48,8 @@ class Bot:
         self.last_position=None
         self.stuck=0
         self.history={}
+        self.previous_move=[0,0]
+        self.target_id=None
 
     def choose_upgrade(self,offer,me):
         priority={"nanites":11,"servos":10,"armor":9,"plating":8.5,"jets":8,
@@ -71,31 +73,32 @@ class Bot:
             for k in range(16):
                 theta=self.phase+k*TAU/16
                 candidates.append((center[0]+ring*math.cos(theta),center[1]+ring*math.sin(theta)))
-        nearest=sorted(enemies,key=lambda e:math.dist(e["pos"][:2],(x,y)))[:3]
+        nearest=sorted(enemies,key=lambda e:math.dist(e["pos"][:2],(x,y)))[:5]
         def score(point):
             px,py=point
             if self.world.blocked[self.world.cell(px,py)]: return 1e8
-            value=math.dist((x,y),point)*.04
+            value=math.dist((x,y),point)*.035
             for enemy in nearest:
                 distance=math.dist(enemy["pos"][:2],point)
-                value+=8000/(distance+25)
+                value+=13000/(distance+25)
                 if distance<230:
                     target=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+5]
                     eye=[px,py,self.world.height(px,py)+8]
-                    if self.world.clear_ray(eye,target): value+=17
+                    if self.world.clear_ray(eye,target): value+=25
             if not nearest and point==(x,y): value+=6
             return value
         goal=min(candidates,key=score)
-        threats=bool(enemies) or me["hp"]<.8*me["max_hp"]
+        close_enemies=[e for e in enemies if math.dist(e["pos"][:2],(x,y))<170]
+        threats=bool(close_enemies) or me["hp"]<.65*me["max_hp"]
         if not threats:
             loot=[]
             for cube in obs["cubes"]:
                 if math.dist(cube["pos"][:2],center)<safe and abs(cube["pos"][2]-z)<5:
                     loot.append((math.dist(cube["pos"][:2],(x,y))*.6,cube["pos"][:2]))
             for pickup in obs["pickups"]:
-                if me["weapons"][1] is None and pickup["kind"]!="gun" and abs(pickup["pos"][2]-z)<5:
+                if me["weapons"][1] is None and pickup["kind"] in ("laser","lightning") and abs(pickup["pos"][2]-z)<5:
                     if math.dist(pickup["pos"][:2],center)<safe:
-                        loot.append((math.dist(pickup["pos"][:2],(x,y)),pickup["pos"][:2]))
+                        loot.append((math.dist(pickup["pos"][:2],(x,y))*(.65 if pickup["kind"]=="laser" else 1.1),pickup["pos"][:2]))
             if loot:
                 cost,point=min(loot,key=lambda item:item[0])
                 if cost<110: goal=point
@@ -110,18 +113,21 @@ class Bot:
         me=obs["self"];x,y,z=me["pos"];stats=me["stats"]
         if self.last_position is not None:
             moved=math.dist(me["pos"][:2],self.last_position)
-            self.stuck=self.stuck+.1 if moved<.13 else max(0,self.stuck-.2)
+            # Waiting to heal/capture is intentional, not a wall collision.
+            trying=math.hypot(*self.previous_move)>.5
+            self.stuck=self.stuck+.1 if trying and moved<.13 else max(0,self.stuck-.2)
         self.last_position=me["pos"][:2]
         if obs["t"]>=self.plan_at:
             self.goal=self.strategic_goal(obs,enemies)
-            self.path=self.world.path(me["pos"],self.goal)
-            self.plan_at=obs["t"]+1.5
+            threats=sorted(enemies,key=lambda e:math.dist(e["pos"][:2],(x,y)))[:5]
+            self.path=self.world.path(me["pos"],self.goal,threats=[enemy["pos"][:2] for enemy in threats])
+            self.plan_at=obs["t"]+1.1
         while self.path and math.dist((x,y),self.path[0])<6:
             self.path.pop(0)
         waypoint=self.path[0] if self.path else self.goal
         desired=unit(waypoint[0]-x,waypoint[1]-y)
         nearest=min((math.dist(e["pos"][:2],(x,y)) for e in enemies),default=1e6)
-        boost=me["energy"]>35 and (nearest<100 or not me["in_zone"] or self.stuck>.6)
+        boost=me["energy"]>32 and (nearest<180 or not me["in_zone"] or self.stuck>.6)
         speed=stats.get("boost_speed",19.5) if boost else stats.get("walk_speed",11.7)
         if math.dist((x,y),waypoint)<3 and nearest>110:
             desired=[0.0,0.0]
@@ -144,8 +150,8 @@ class Bot:
             for enemy in enemies:
                 ex,ey=enemy["pos"][:2]
                 dist=math.hypot(px-ex,py-ey)
-                value+=1400/max(18,dist)
-                if "lightning" in enemy.get("weapons",[]) and dist<55:value+=(55-dist)*1.2
+                value+=5500/max(18,dist)
+                if "lightning" in enemy.get("weapons",[]) and dist<65:value+=(65-dist)*2
                 if enemy.get("charging"):
                     vx,vy=px-ex,py-ey;eyaw=enemy["aim"][0]
                     along=vx*math.cos(eyaw)+vy*math.sin(eyaw)
@@ -169,25 +175,35 @@ class Bot:
             jump=me["grounded"];boost=True
         elif nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
             jump=me["grounded"]
+        self.previous_move=chosen
         return chosen,boost,jump
 
     def aim_fire(self,obs,enemies):
         me=obs["self"];x,y,z=me["pos"];stats=me["stats"]
         origin=[x,y,z+stats.get("muzzle_height",7)]
         targets=[]
-        regen=me["hp"]<.65*me["max_hp"]
+        regen=me["hp"]<.72*me["max_hp"]
         for enemy in enemies:
             distance=math.dist(enemy["pos"][:2],(x,y))
-            if distance>290 or (regen and distance>85):continue
+            if distance>290 or (regen and distance>65):continue
             center=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+4.5*(1+.05*enemy.get("cubes",0))]
             if self.world.clear_ray(origin,center):
                 score=distance+max(0,enemy.get("hp",1400)-400)*.025
+                if enemy["id"]==self.target_id:score-=40
                 if enemy.get("charging"):score-=20
                 targets.append((score,enemy,center))
         if not targets and not enemies and not regen:
+            # Farm isolated drones from beyond their aggro radius for two cubes.
+            # This is deliberately bounded: nearby house mechs always dominate.
+            for drone in obs["mechs"]:
+                if drone["kind"]!="npc":continue
+                distance=math.dist(drone["pos"][:2],(x,y))
+                if 55<distance<115:
+                    center=[drone["pos"][0],drone["pos"][1],drone["pos"][2]+1.75]
+                    if self.world.clear_ray(origin,center):targets.append((distance*.8,drone,center))
             for crate in obs["crates"]:
                 distance=math.dist(crate["pos"][:2],(x,y))
-                if distance<80 and abs(crate["pos"][2]-z)<15:
+                if distance<55 and abs(crate["pos"][2]-z)<15:
                     center=[crate["pos"][0],crate["pos"][1],crate["pos"][2]+1.2]
                     if self.world.clear_ray(origin,center):targets.append((distance,crate,center))
         if not targets:
@@ -198,16 +214,18 @@ class Bot:
             else:yaw=self.phase+obs["t"]*.7
             return [yaw,0.0],[False,False],False
         _,target,center=min(targets,key=lambda item:item[0])
+        self.target_id=target["id"]
         velocity=target.get("vel",[0,0,0])
         distance=math.dist(center,origin)
         weapons=me["weapons"]
         secondary=next(((i,w) for i,w in enumerate(weapons) if w and w["kind"]!="gun"),None)
-        aimpoint=intercept(origin,center,velocity,next((w["stats"].get("speed",252) for w in weapons if w and w["kind"]=="gun"),252))
+        gunpoint=intercept(origin,center,velocity,next((w["stats"].get("speed",252) for w in weapons if w and w["kind"]=="gun"),252))
+        aimpoint=gunpoint
         primary="gun"
         pitch=None
         if secondary:
             slot,weapon=secondary;kind=weapon["kind"];ws=weapon["stats"]
-            if kind=="laser" and distance<ws.get("range",280) and (weapon.get("charge",0)>0 or weapon["cooldown"]<=.05):
+            if kind=="laser" and distance<ws.get("range",280) and (weapon.get("charge",0)>0 or (weapon["cooldown"]<=.05 and distance>65)):
                 primary="laser";aimpoint=center
             elif kind=="lightning" and distance<ws.get("range",45):primary="lightning";aimpoint=center
             elif kind=="mortar" and 27<distance<230 and weapon["cooldown"]<=.05:
@@ -236,7 +254,12 @@ class Bot:
             ws=weapon["stats"];kind=weapon["kind"]
             aligned=error_yaw<tolerance and error_pitch<tolerance*1.5
             if kind=="gun":
-                fire[i]=primary=="gun" and distance<ws.get("range",230) and aligned
+                gun_yaw=math.atan2(gunpoint[1]-y,gunpoint[0]-x)
+                gun_pitch=math.atan2(gunpoint[2]-origin[2],math.dist(gunpoint[:2],(x,y)))
+                gun_aligned=abs(angle_delta(gun_yaw,me["aim"][0]))<tolerance and abs(gun_pitch-me["aim"][1])<tolerance*1.5
+                # Both guns can fire while a laser charges when their own
+                # intercept solution matches the actual turret orientation.
+                fire[i]=distance<ws.get("range",230) and gun_aligned
                 reload=weapon.get("ammo",0)<=0 or (weapon.get("ammo",0)<3 and distance>100)
             elif kind=="laser":
                 charge=weapon.get("charge",0)
@@ -254,7 +277,7 @@ class Bot:
         act={"tick":obs["tick"],"move":movement,"aim":aim,"boost":boost,"jump":jump,"fire":fire,"reload":reload}
         if obs.get("offer"):act["pick"]=self.choose_upgrade(obs["offer"],me)
         for pickup in sorted(obs["pickups"],key=lambda p:math.dist(p["pos"][:2],me["pos"][:2])):
-            if me["weapons"][1] is None and pickup["kind"]!="gun":
+            if me["weapons"][1] is None and pickup["kind"] in ("laser","lightning"):
                 if math.dist(pickup["pos"][:2],me["pos"][:2])<=self.config["loot"]["pickup_radius"] and abs(pickup["pos"][2]-me["pos"][2])<=4:
                     act["take"]=pickup["id"];break
         return act
