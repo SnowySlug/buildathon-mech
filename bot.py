@@ -37,7 +37,7 @@ def intercept(origin,target,velocity,speed):
 
 
 class Bot:
-    name="Snowy-Economy-v9"
+    name="Snowy-Provision-v10"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -59,6 +59,10 @@ class Bot:
         self.healing=False
         self.last_hurt=-100
         self.last_dealt=-100
+        self.burst_id=None
+        self.burst_until=-100
+        self.economy_target=None
+        self.looting=False
         gc.collect();gc.disable()
 
     def secondary(self,me):
@@ -68,6 +72,7 @@ class Bot:
         distance=math.dist(enemy["pos"][:2],me["pos"][:2])
         score=distance+enemy.get("hp",1400)*.10+enemy.get("cubes",0)*10
         if enemy["id"]==self.target_id:score-=45
+        if enemy["id"]==self.burst_id:score-=85
         weapon=self.secondary(me)
         if weapon and weapon["kind"]=="lightning" and "laser" in enemy.get("weapons",[]):score-=30
         return score
@@ -86,6 +91,66 @@ class Bot:
             if event["type"]=="damaged":self.last_hurt=now;self.healing=False
             elif event["type"]=="hit":self.last_dealt=now
             elif event["type"]=="took":self.loot_memory.pop(event["id"],None)
+        if self.burst_id is not None:
+            alive=any(enemy["id"]==self.burst_id for enemy in obs["mechs"] if enemy["kind"]=="mech")
+            if not alive or now>=self.burst_until or me["hp"]<.23*me["max_hp"] or me["energy"]<6:
+                self.burst_id=None
+
+    def burst_ready(self,obs,target,nearby):
+        """A tight/front-facing squad is not automatically an encirclement."""
+        me=obs["self"];weapon=self.secondary(me)
+        if not weapon or weapon["kind"]!="lightning" or not target:return False
+        active=self.burst_id==target["id"] and obs["t"]<self.burst_until
+        if me["hp"]<(.23 if active else .45)*me["max_hp"] or math.dist(me["pos"][:2],target["pos"][:2])>110:return False
+        scale=1+self.config["cubes"].get("damage_per_cube",.04)*min(me.get("cubes",0),self.config["cubes"].get("stat_cap",10))
+        damage=weapon["stats"].get("damage",60)*scale
+        # Gun contributes to the burst; bound the reserve rather than
+        # assuming every desired shot will land.
+        reserve=max(18,min(42,target.get("hp",1400)/max(damage,1)*weapon["stats"].get("energy",3)*.65))
+        if me["energy"]<(6 if active else reserve):return False
+        yaw=math.atan2(target["pos"][1]-me["pos"][1],target["pos"][0]-me["pos"][0])
+        front=math.radians(me["stats"].get("front_arc_deg",180))*.47
+        if len(nearby)>=3:
+            cluster=sum(enemy["id"]!=target["id"] and math.dist(enemy["pos"][:2],target["pos"][:2])<weapon["stats"].get("chain_range",14) for enemy in nearby)
+            if cluster<2:return False
+        return all(abs(angle_delta(math.atan2(enemy["pos"][1]-me["pos"][1],enemy["pos"][0]-me["pos"][0]),yaw))<front for enemy in nearby)
+
+    def opening_goal(self,obs,enemies):
+        """Short bounded acquisition phase, yielding to immediate threats/zone."""
+        me=obs["self"];x,y,z=me["pos"];zone=obs["zone"]
+        if obs["t"]>65 or self.secondary(me) is not None or me["hp"]<.55*me["max_hp"]:return None
+        nearest=min((math.dist(enemy["pos"][:2],(x,y)) for enemy in enemies),default=1e9)
+        if any(enemy.get("hp",1400)<300 and math.dist(enemy["pos"][:2],(x,y))<160 for enemy in enemies):return None
+        if nearest<70 or len([enemy for enemy in enemies if math.dist(enemy["pos"][:2],(x,y))<145])>2:return None
+        def safe(point):
+            if abs(point[2]-z)>4 or math.dist(point[:2],zone["center"])>zone["radius"]-12:return False
+            travel=math.dist(point[:2],(x,y))
+            escape=max(0,math.dist(point[:2],zone["next_center"])-zone["next_radius"]+16)
+            if (travel+escape)/me["stats"].get("walk_speed",11.7)+12>zone["shrink_end"]-obs["t"]:return False
+            return all(math.dist(point[:2],enemy["pos"][:2])>=max(55,min(95,math.dist(enemy["pos"][:2],(x,y))-10)) for enemy in enemies)
+        pickups=[]
+        for pickup,_ in self.loot_memory.values():
+            distance=math.dist(pickup["pos"][:2],(x,y))
+            if pickup["kind"]!="gun" and distance<175 and safe(pickup["pos"]):
+                pickups.append((distance*(.75 if pickup["kind"]=="lightning" else 1),pickup))
+        if pickups:
+            _,pickup=min(pickups,key=lambda item:item[0]);self.looting=True
+            return pickup["pos"][:2]
+        # Do not start a farm duel while a nearby player is threatening us.
+        if nearest<110:return None
+        farms=[]
+        for item in obs["crates"]+[drone for drone in obs["mechs"] if drone["kind"]=="npc"]:
+            distance=math.dist(item["pos"][:2],(x,y))
+            npc=item.get("kind")=="npc"
+            if distance<(75 if npc else 65) and safe(item["pos"]):
+                farms.append((distance+(8 if npc else 12),item))
+        if farms:
+            _,item=min(farms,key=lambda pair:pair[0]);self.economy_target=item
+            if item.get("kind")=="npc":
+                direction=unit(x-item["pos"][0],y-item["pos"][1])
+                return [item["pos"][0]+direction[0]*18,item["pos"][1]+direction[1]*18]
+            return item["pos"][:2]
+        return None
 
     def choose_upgrade(self,offer,me):
         priority={"nanites":8,"servos":8,"armor":9,"plating":8.5,"jets":8,
@@ -94,20 +159,7 @@ class Bot:
                   "lightning_range":11,"lightning_efficiency":10,"gyros":6,
                   "sensors":4,"capacitor":5,"mortar_reload":6,"mortar_velocity":5,
                   "mortar_splash":6,"laser_pierce":4,"lightning_chain":8}
-        held={weapon["kind"] for weapon in me["weapons"] if weapon}
-        if "lightning" in held:priority["lightning_efficiency"]=12
-        gun=next((weapon for weapon in me["weapons"] if weapon and weapon["kind"]=="gun"),None)
-        if gun:
-            ws=gun["stats"];mag=ws.get("mag",12);cooldown=ws.get("cooldown",.24);reload=ws.get("reload",2.4)
-            before=mag/max(1e-9,mag*cooldown+reload)
-            after=(mag+8)/max(1e-9,(mag+8)*cooldown+reload*.8)
-            # First drum beats a15% damage upgrade for sustained fire;
-            # later drums have smaller returns. Use actual upgraded stats.
-            priority["gun_mag"]=11.5 if after/before>1.15 else 9.8
-        if self.healing and me["hp"]<.5*me["max_hp"]:priority["nanites"]=10.5
-        for upgrade in self.config.get("upgrades",[]):
-            if upgrade.get("requires") and upgrade["requires"] not in held:
-                priority[upgrade["id"]]=1
+        if me["hp"]<.5*me["max_hp"]:priority["nanites"]=10.5
         return max(range(len(offer["choices"])),key=lambda i:priority.get(offer["choices"][i]["id"],3))
 
     def retreat_goal(self,obs,enemies):
@@ -166,6 +218,7 @@ class Bot:
         urgent=(not me["in_zone"] or zone["next_radius"]<65 or
                 (outside_next>0 and zone["shrink_end"]-obs["t"]<outside_next/me["stats"].get("walk_speed",11.7)+9))
         self.combat_target=None
+        self.economy_target=None;self.looting=False
         if urgent:return self.retreat_goal(obs,enemies)
         nearby=[enemy for enemy in enemies if math.dist(enemy["pos"][:2],(x,y))<145]
         target=min(enemies,key=lambda enemy:self.target_score(enemy,me)) if enemies else None
@@ -181,6 +234,8 @@ class Bot:
                 if drop["lands_in"]<6 and math.dist(drop["pos"][:2],(x,y))<110:
                     if all(math.dist(enemy["pos"][:2],drop["pos"][:2])>85 for enemy in enemies):return drop["pos"][:2]
             return self.retreat_goal(obs,enemies)
+        provision=self.opening_goal(obs,enemies)
+        if provision is not None:return provision
         resources=[]
         for cube,_ in self.cube_memory.values():
             d=math.dist(cube["pos"][:2],(x,y))
@@ -208,6 +263,14 @@ class Bot:
             if kind=="lightning":desired=min(desired,weapon["stats"].get("range",45)*.8)
             if len(nearby)>=3:desired=max(desired,90)
             if target.get("hp",1400)<260 and len(nearby)<=2:desired=min(desired,42)
+            if self.burst_ready(obs,target,nearby):
+                if self.burst_id!=target["id"]:
+                    self.burst_id=target["id"];self.burst_until=obs["t"]+4.0
+                desired=min(26,weapon["stats"].get("range",45)*.7)
+            elif self.burst_id==target["id"]:
+                # Abort the committed approach when crossfire or low reserves
+                # invalidate it; the regular v5 fallback remains available.
+                self.burst_id=None
             self.combat_target=target;self.combat_range=desired
             dx,dy=x-target["pos"][0],y-target["pos"][1]
             direction=unit(dx,dy)
@@ -254,6 +317,9 @@ class Bot:
         weapon=self.secondary(me)
         if duel and weapon and weapon["kind"]=="lightning":
             boost=me["energy"]>65 and math.dist(duel["pos"][:2],(x,y))>self.combat_range+25
+        if self.looting:boost=me["energy"]>60 and math.dist((x,y),self.goal)>20
+        if self.burst_id is not None and weapon and nearest<weapon["stats"].get("range",45)+10 and me["in_zone"]:
+            boost=False
         if not me["in_zone"]:boost=me["energy"]>8
         speed=stats.get("boost_speed",19.5) if boost else stats.get("walk_speed",11.7)
         if math.dist((x,y),waypoint)<3 and nearest>110:
@@ -264,6 +330,7 @@ class Bot:
         radius=stats.get("radius",2.5)
         height=stats.get("height",9)
         zone=obs["zone"]
+        bursting=self.burst_id is not None and obs["t"]<self.burst_until
         bullets=obs.get("projectiles",[])[:45]
         def score(direction):
             dx,dy=direction
@@ -279,8 +346,8 @@ class Bot:
             for enemy in enemies:
                 ex,ey=enemy["pos"][:2]
                 dist=math.hypot(px-ex,py-ey)
-                value+=1400/max(18,dist)
-                if "lightning" in enemy.get("weapons",[]) and dist<55:value+=(55-dist)*1.2
+                value+=(300 if bursting else 1400)/max(18,dist)
+                if not bursting and "lightning" in enemy.get("weapons",[]) and dist<55:value+=(55-dist)*1.2
                 if enemy.get("charging"):
                     vx,vy=px-ex,py-ey;eyaw=enemy["aim"][0]
                     along=vx*math.cos(eyaw)+vy*math.sin(eyaw)
@@ -302,7 +369,7 @@ class Bot:
         jump=False
         if self.stuck>.7 and me["energy"]>25:
             jump=me["grounded"];boost=True
-        elif nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
+        elif self.burst_id is None and nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
             jump=me["grounded"]
         self.previous_move=chosen
         return chosen,boost,jump
@@ -320,12 +387,17 @@ class Bot:
                 score=self.target_score(enemy,me)
                 if enemy.get("charging"):score-=20
                 targets.append((score,enemy,center))
+        if self.economy_target and not regen and not any(math.dist(enemy["pos"][:2],(x,y))<70 or (enemy.get("hp",1400)<300 and math.dist(enemy["pos"][:2],(x,y))<160) for enemy in enemies):
+            item=next((item for item in obs["crates"]+obs["mechs"] if item["id"]==self.economy_target["id"]),None)
+            if item:
+                center=[item["pos"][0],item["pos"][1],item["pos"][2]+(self.config["npc"].get("height",3.5)*.5 if item.get("kind")=="npc" else 1.2)]
+                if self.world.clear_ray(origin,center):targets.append((-200,item,center))
         if not targets and not enemies and not regen:
             for drone in obs["mechs"]:
                 if drone["kind"]!="npc":continue
                 distance=math.dist(drone["pos"][:2],(x,y))
                 center=[drone["pos"][0],drone["pos"][1],drone["pos"][2]+self.config["npc"].get("height",3.5)*.5]
-                if 48<distance<115 and self.world.clear_ray(origin,center):targets.append((distance*.8,drone,center))
+                if distance<115 and self.world.clear_ray(origin,center):targets.append((distance*.8,drone,center))
             for crate in obs["crates"]:
                 distance=math.dist(crate["pos"][:2],(x,y))
                 if distance<80 and abs(crate["pos"][2]-z)<15:
