@@ -6,7 +6,6 @@ import json
 import math
 from pathlib import Path
 import sys
-import time
 
 
 def inside(x, y, ring):
@@ -18,81 +17,6 @@ def inside(x, y, ring):
             odd = not odd
         x0, y0 = x1, y1
     return odd
-
-
-
-def crossed_cells(a,b,step=32):
-    """Supercover grid DDA, including bins touched at exact corner crossings."""
-    dx,dy=b[0]-a[0],b[1]-a[1]
-    i,j=math.floor(a[0]/step),math.floor(a[1]/step)
-    end_i,end_j=math.floor(b[0]/step),math.floor(b[1]/step)
-    yield i,j
-    si=1 if dx>0 else -1 if dx<0 else 0
-    sj=1 if dy>0 else -1 if dy<0 else 0
-    tx=(((i+1 if si>0 else i)*step-a[0])/dx) if si else math.inf
-    ty=(((j+1 if sj>0 else j)*step-a[1])/dy) if sj else math.inf
-    delta_x=step/abs(dx) if si else math.inf
-    delta_y=step/abs(dy) if sj else math.inf
-    remaining=abs(end_i-i)+abs(end_j-j)+3
-    while (i,j)!=(end_i,end_j) and remaining>0:
-        remaining-=1
-        if abs(tx-ty)<1e-12:
-            yield i+si,j
-            yield i,j+sj
-            i+=si;j+=sj;tx+=delta_x;ty+=delta_y
-        elif tx<ty:
-            i+=si;tx+=delta_x
-        else:
-            j+=sj;ty+=delta_y
-        yield i,j
-
-
-def exact_clear_ray(world,a,b,inside):
-    """None means budget-exhausted, never positive evidence of safe cover."""
-    deadline=getattr(world,"geometry_deadline",None)
-    def expired():return deadline is not None and time.process_time()>=deadline
-    if expired():return None
-    dx,dy,dz=b[0]-a[0],b[1]-a[1],b[2]-a[2]
-    found=set()
-    for cell in crossed_cells(a,b):found.update(world.bins.get(cell,()))
-    for number in found:
-        if expired():return None
-        prism=world.prisms[number]
-        if abs(dz)<1e-12:
-            if not prism["base"]<=a[2]<=prism["top"]:continue
-            low,high=0.0,1.0
-        else:
-            lower=(prism["base"]-a[2])/dz;upper=(prism["top"]-a[2])/dz
-            low=max(0.0,min(lower,upper));high=min(1.0,max(lower,upper))
-            if low>=high:continue
-        # Z-plane intersections are necessary even when XY never crosses an edge.
-        hits=[low,high]
-        for ring in (prism["ring"],*prism.get("holes",[])):
-            if expired():return None
-            x0,y0=ring[-2:]
-            for index in range(0,len(ring),2):
-                x1,y1=ring[index:index+2]
-                ex,ey=x1-x0,y1-y0
-                determinant=dx*ey-dy*ex
-                if abs(determinant)>1e-9:
-                    rx,ry=x0-a[0],y0-a[1]
-                    t=(rx*ey-ry*ex)/determinant
-                    u=(rx*dy-ry*dx)/determinant
-                    if low<t<high and 0<=u<=1:hits.append(t)
-                x0,y0=x1,y1
-        hits.sort()
-        for left,right in zip(hits,hits[1:]):
-            if expired():return None
-            t=(left+right)/2;x=a[0]+dx*t;y=a[1]+dy*t
-            if inside(x,y,prism["ring"]) and not any(inside(x,y,hole) for hole in prism.get("holes",[])):
-                return False
-    # Terrain sampling is intentionally unchanged in this isolated variant.
-    steps=max(1,int(math.hypot(dx,dy)/24)+1)
-    for index in range(1,steps):
-        if expired():return None
-        t=index/steps
-        if a[2]+dz*t<world.height(a[0]+dx*t,a[1]+dy*t)+.15:return False
-    return True
 
 
 class World:
@@ -247,4 +171,39 @@ class World:
         return True
 
     def clear_ray(self,a,b):
-        return exact_clear_ray(self,a,b,inside)
+        dx,dy,dz=b[0]-a[0],b[1]-a[1],b[2]-a[2]
+        found=set()
+        steps=max(1,int(math.hypot(dx,dy)/24)+1)
+        for k in range(steps+1):
+            f=k/steps
+            found.update(self.candidates(a[0]+dx*f,a[1]+dy*f))
+        for n in found:
+            p=self.prisms[n]
+            if max(a[2],b[2])<p["base"] or min(a[2],b[2])>p["top"]:
+                continue
+            hits=[0.0,1.0]
+            for ring in [p["ring"],*p.get("holes",[])]:
+                x0,y0=ring[-2:]
+                for i in range(0,len(ring),2):
+                    x1,y1=ring[i:i+2]
+                    ex,ey=x1-x0,y1-y0
+                    determinant=dx*ey-dy*ex
+                    if abs(determinant)>1e-9:
+                        rx,ry=x0-a[0],y0-a[1]
+                        t=(rx*ey-ry*ex)/determinant
+                        u=(rx*dy-ry*dx)/determinant
+                        if 0<t<1 and 0<=u<=1:
+                            hits.append(t)
+                    x0,y0=x1,y1
+            hits.sort()
+            for left,right in zip(hits,hits[1:]):
+                t=(left+right)/2
+                x,y,z=a[0]+dx*t,a[1]+dy*t,a[2]+dz*t
+                if p["base"]<=z<=p["top"] and inside(x,y,p["ring"]) and not any(inside(x,y,h) for h in p.get("holes",[])):
+                    return False
+        # Terrain blocks shots too. Sampling is conservative near ground.
+        for k in range(1,steps):
+            f=k/steps
+            if a[2]+dz*f<self.height(a[0]+dx*f,a[1]+dy*f)+.15:
+                return False
+        return True
