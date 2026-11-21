@@ -37,7 +37,7 @@ def intercept(origin,target,velocity,speed):
 
 
 class Bot:
-    name="Snowy-Breaker-v8"
+    name="Snowy-Economy-v9"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -59,8 +59,6 @@ class Bot:
         self.healing=False
         self.last_hurt=-100
         self.last_dealt=-100
-        self.burst_id=None
-        self.burst_until=-100
         gc.collect();gc.disable()
 
     def secondary(self,me):
@@ -70,7 +68,6 @@ class Bot:
         distance=math.dist(enemy["pos"][:2],me["pos"][:2])
         score=distance+enemy.get("hp",1400)*.10+enemy.get("cubes",0)*10
         if enemy["id"]==self.target_id:score-=45
-        if enemy["id"]==self.burst_id:score-=85
         weapon=self.secondary(me)
         if weapon and weapon["kind"]=="lightning" and "laser" in enemy.get("weapons",[]):score-=30
         return score
@@ -89,29 +86,6 @@ class Bot:
             if event["type"]=="damaged":self.last_hurt=now;self.healing=False
             elif event["type"]=="hit":self.last_dealt=now
             elif event["type"]=="took":self.loot_memory.pop(event["id"],None)
-        if self.burst_id is not None:
-            alive=any(enemy["id"]==self.burst_id for enemy in obs["mechs"] if enemy["kind"]=="mech")
-            if not alive or now>=self.burst_until or me["hp"]<.23*me["max_hp"] or me["energy"]<6:
-                self.burst_id=None
-
-    def burst_ready(self,obs,target,nearby):
-        """A tight/front-facing squad is not automatically an encirclement."""
-        me=obs["self"];weapon=self.secondary(me)
-        if not weapon or weapon["kind"]!="lightning" or not target:return False
-        active=self.burst_id==target["id"] and obs["t"]<self.burst_until
-        if me["hp"]<(.23 if active else .45)*me["max_hp"] or math.dist(me["pos"][:2],target["pos"][:2])>110:return False
-        scale=1+self.config["cubes"].get("damage_per_cube",.04)*min(me.get("cubes",0),self.config["cubes"].get("stat_cap",10))
-        damage=weapon["stats"].get("damage",60)*scale
-        # Gun contributes to the burst; bound the reserve rather than
-        # assuming every desired shot will land.
-        reserve=max(18,min(42,target.get("hp",1400)/max(damage,1)*weapon["stats"].get("energy",3)*.65))
-        if me["energy"]<(6 if active else reserve):return False
-        yaw=math.atan2(target["pos"][1]-me["pos"][1],target["pos"][0]-me["pos"][0])
-        front=math.radians(me["stats"].get("front_arc_deg",180))*.47
-        if len(nearby)>=3:
-            cluster=sum(enemy["id"]!=target["id"] and math.dist(enemy["pos"][:2],target["pos"][:2])<weapon["stats"].get("chain_range",14) for enemy in nearby)
-            if cluster<2:return False
-        return all(abs(angle_delta(math.atan2(enemy["pos"][1]-me["pos"][1],enemy["pos"][0]-me["pos"][0]),yaw))<front for enemy in nearby)
 
     def choose_upgrade(self,offer,me):
         priority={"nanites":8,"servos":8,"armor":9,"plating":8.5,"jets":8,
@@ -120,7 +94,20 @@ class Bot:
                   "lightning_range":11,"lightning_efficiency":10,"gyros":6,
                   "sensors":4,"capacitor":5,"mortar_reload":6,"mortar_velocity":5,
                   "mortar_splash":6,"laser_pierce":4,"lightning_chain":8}
-        if me["hp"]<.5*me["max_hp"]:priority["nanites"]=10.5
+        held={weapon["kind"] for weapon in me["weapons"] if weapon}
+        if "lightning" in held:priority["lightning_efficiency"]=12
+        gun=next((weapon for weapon in me["weapons"] if weapon and weapon["kind"]=="gun"),None)
+        if gun:
+            ws=gun["stats"];mag=ws.get("mag",12);cooldown=ws.get("cooldown",.24);reload=ws.get("reload",2.4)
+            before=mag/max(1e-9,mag*cooldown+reload)
+            after=(mag+8)/max(1e-9,(mag+8)*cooldown+reload*.8)
+            # First drum beats a15% damage upgrade for sustained fire;
+            # later drums have smaller returns. Use actual upgraded stats.
+            priority["gun_mag"]=11.5 if after/before>1.15 else 9.8
+        if self.healing and me["hp"]<.5*me["max_hp"]:priority["nanites"]=10.5
+        for upgrade in self.config.get("upgrades",[]):
+            if upgrade.get("requires") and upgrade["requires"] not in held:
+                priority[upgrade["id"]]=1
         return max(range(len(offer["choices"])),key=lambda i:priority.get(offer["choices"][i]["id"],3))
 
     def retreat_goal(self,obs,enemies):
@@ -221,14 +208,6 @@ class Bot:
             if kind=="lightning":desired=min(desired,weapon["stats"].get("range",45)*.8)
             if len(nearby)>=3:desired=max(desired,90)
             if target.get("hp",1400)<260 and len(nearby)<=2:desired=min(desired,42)
-            if self.burst_ready(obs,target,nearby):
-                if self.burst_id!=target["id"]:
-                    self.burst_id=target["id"];self.burst_until=obs["t"]+4.0
-                desired=min(26,weapon["stats"].get("range",45)*.7)
-            elif self.burst_id==target["id"]:
-                # Abort the committed approach when crossfire or low reserves
-                # invalidate it; the regular v5 fallback remains available.
-                self.burst_id=None
             self.combat_target=target;self.combat_range=desired
             dx,dy=x-target["pos"][0],y-target["pos"][1]
             direction=unit(dx,dy)
@@ -275,8 +254,6 @@ class Bot:
         weapon=self.secondary(me)
         if duel and weapon and weapon["kind"]=="lightning":
             boost=me["energy"]>65 and math.dist(duel["pos"][:2],(x,y))>self.combat_range+25
-        if self.burst_id is not None and weapon and nearest<weapon["stats"].get("range",45)+10 and me["in_zone"]:
-            boost=False
         if not me["in_zone"]:boost=me["energy"]>8
         speed=stats.get("boost_speed",19.5) if boost else stats.get("walk_speed",11.7)
         if math.dist((x,y),waypoint)<3 and nearest>110:
@@ -287,7 +264,6 @@ class Bot:
         radius=stats.get("radius",2.5)
         height=stats.get("height",9)
         zone=obs["zone"]
-        bursting=self.burst_id is not None and obs["t"]<self.burst_until
         bullets=obs.get("projectiles",[])[:45]
         def score(direction):
             dx,dy=direction
@@ -303,8 +279,8 @@ class Bot:
             for enemy in enemies:
                 ex,ey=enemy["pos"][:2]
                 dist=math.hypot(px-ex,py-ey)
-                value+=(300 if bursting else 1400)/max(18,dist)
-                if not bursting and "lightning" in enemy.get("weapons",[]) and dist<55:value+=(55-dist)*1.2
+                value+=1400/max(18,dist)
+                if "lightning" in enemy.get("weapons",[]) and dist<55:value+=(55-dist)*1.2
                 if enemy.get("charging"):
                     vx,vy=px-ex,py-ey;eyaw=enemy["aim"][0]
                     along=vx*math.cos(eyaw)+vy*math.sin(eyaw)
@@ -326,7 +302,7 @@ class Bot:
         jump=False
         if self.stuck>.7 and me["energy"]>25:
             jump=me["grounded"];boost=True
-        elif self.burst_id is None and nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
+        elif nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
             jump=me["grounded"]
         self.previous_move=chosen
         return chosen,boost,jump

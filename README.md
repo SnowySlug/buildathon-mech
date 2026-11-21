@@ -1,59 +1,63 @@
-# Snowy Breaker v8
+# Snowy Economy v9
 
-A focused Lightning burst experiment derived from Assault v5, whose official
-practice score is 4.00 placement points. V8 gameplay strength is unmeasured.
+An isolated upgrade-policy experiment on Assault v5, whose official practice
+score is 4.00 placement points. V9 gameplay strength is unmeasured. V5 combat
+ranges, target scoring, weapon preference, loot policy and movement strategy
+are retained; this version does not include V8 burst behavior.
 
-V5 switches to a 90 m combat distance whenever three enemies are within 145 m.
-That disables its default 45 m Lightning. Its local movement scoring also
-penalizes approaching every enemy, opposing the desired combat distance. A
-cluster directly ahead can offer chain damage while fitting inside front armor;
-it is different from being surrounded.
+Upgrade changes:
 
-V8 starts a four-second focused burst when it has sufficient HP and energy,
-the target is within 110 m, and nearby threats fit conservatively inside the
-target-facing front arc. With three or more nearby enemies, at least two must
-be within the target's Lightning chain range. During that burst it aims for
-26 m, reduces contradictory generic proximity repulsion, and permits the
-committed approach despite enemy Lightning. Walls, zone and projectile checks
-remain active. It keeps focus, conserves in-range firing energy and avoids
-periodic discretionary jumps. Critical health, depleted energy, target loss,
-expiry or unsafe geometry cancels the commitment. The usual V5 behavior remains
-available outside a qualified burst. Upgrade priorities are unchanged.
+- Prefer Lightning efficiency while holding Lightning. Each stack adds 10%
+  damage and reduces shot energy by 35%, improving damage per energy by 69.23%.
+- Prefer the first drum magazine over range or gun damage when its sustained
+  throughput gain exceeds 15%. Recompute using current gun stats; subsequent
+  drums can lose priority to a 15% gun damage upgrade.
+- Give low-HP repair nanites their emergency preference during explicit healing
+  mode. Continuous combat prevents regeneration from starting.
+- Deprioritize pending weapon-specific choices for weapons no longer held.
 
-The published default arc does 60 damage every 0.25 s for 3 energy. Two full
-chain jumps can add 42 and 29.4 damage, giving an ideal maximum of 525.6 total
-arc DPS across three targets, before cubes and armor. Gun plus Lightning needs
-3.5 s and 45 arc energy for one perfect-hit unarmored 1400 HP kill in the
-existing ideal model. Two dropped cubes add 8% max HP and damage before the cap
-and can unlock upgrades. These arithmetic bounds exclude misses, movement,
-incoming damage, armor and cover; they do not predict placement.
+Published-stat arithmetic, before cubes/armor:
 
-Validation:
+| Lightning efficiency stacks | Energy/shot | Damage/shot | Shots per full 100 energy |
+| --- | ---: | ---: | ---: |
+| 0 | 3 | 60 | 33 |
+| 1 | 1.95 | 66 | 51 |
+| 2 | 1.2675 | 72.6 | 78 |
 
-- 15 tests pass, including clustered versus surrounded/spread squads, energy
-  reserves, continued spending during a burst, focus, cancellation, combined
-  weapons and safe pickup swaps.
-- The official recorded checker passed 300/300 observations with zero late,
-  stale, wrong-tick or malformed actions; p99 11.6 ms, maximum 24.2 ms.
-- Direct recorded-observation computation: maximum 16.01 ms CPU, 16.30 ms wall.
-- A 64-case public-map stress test with 15 tracked enemies in ring and forward
-  cluster layouts: maximum 8.97 ms CPU, 10.76 ms wall, 24.6 MiB peak RSS.
-- A separate 12-second horizontal opportunity probe holds three enemy HP and
-  positions fixed on an empty floor. V5 spends zero seconds in arc range and
-  produces zero arc trigger opportunities. V8 spends 8.15 seconds in range and
-  produces 31 opportunities, reaching 28.88 m separation. The frozen enemies
-  never attack, move or die; vertical movement, cover, misses and armor are
-  excluded. This demonstrates the intended policy change, not a combat win.
+The first drum changes 12 rounds / 2.4 s reload into 20 rounds / 1.92 s reload:
+ideal sustained gun DPS rises approximately 29.6–31.0% across two reload-order
+bounds. The second drum's marginal gain is approximately 13.2–14.0%, below a
+15% damage upgrade. Actual stats drive this comparison.
 
-The V5 ground algorithms include soft CPU work limits. Unknown ray clearance
-never authorizes fire or establishes cover. Approximate map geometry and
-constant-velocity gun lead remain limitations. Committing at short range can
-lose a damage race, especially against multiple Lightning carriers or mortars;
-chain hits depend on actual target ordering. Official evaluation is required.
+Two collected cubes grant 8% max HP and damage before the cap (1512 max HP from
+1400), plus the first upgrade offer. Three and six cubes unlock the second and
+third offers. Cubes also increase physical size; more HP does not imply that
+collection is always safe. The model never assumes max-HP or max-energy upgrades
+immediately refill current values.
+
+An ideal three-target sequence includes perfect hits on three stationary,
+unarmored 1400 HP targets and immediate target switching. With ideal energy
+recovery after spending pauses, the third kill occurs at 15.61–16.08 s with no
+efficiency and 11.25–11.50 s with one efficiency stack. It excludes incoming
+damage, movement, misses, cover, cubes, opportunity cost and actual decision
+timing. A separate no-energy-recovery bound is also recorded. These are
+arithmetic comparisons, not a match simulator or placement prediction.
+
+Validation: 14 tests pass. The official recorded checker passed 300/300
+observations with zero late, malformed, stale or wrong-tick actions; p99
+15.2 ms, maximum 18.4 ms. Direct recorded computation reached 18.22 ms CPU/wall.
+A 64-case public-map stress test with 15 tracked enemies reached 10.61 ms
+CPU/wall and 24.6 MiB peak RSS. The V5 geometric algorithms include previously
+tested soft work limits; unknown clearance permits neither shooting nor claims
+of cover. Startup collects garbage before acyclic runtime processing.
+
+Risks: actual fights may favor immediate first-kill damage, range or defensive
+upgrades; random offers can limit policy impact; Lightning may be unavailable.
+Runtime guards can truncate planning. Only official evaluation can establish
+whether this policy improves placement.
 
 Publish seven files at repository root: Dockerfile, .dockerignore, bot.py,
-navigation.py, mechfight.py, README.md, LICENSE. Standard library only; arena
-data are mounted by the scorer. MIT licensed. The wrapper derives from the
-organizer kit with fail-fast initialization; our code was built with AI
-assistance during the event. Official rules and kit:
-https://www.joinbuilders.org/buildathon/tracks/builders .
+navigation.py, mechfight.py, README.md, LICENSE. Standard library only; the
+scorer mounts arena data. MIT licensed. The wrapper derives from the organizer
+kit with fail-fast startup; our code was built with AI assistance during the
+event. Official rules and starter: https://www.joinbuilders.org/buildathon/tracks/builders .
