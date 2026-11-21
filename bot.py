@@ -14,6 +14,13 @@ def angle_delta(a,b):
     return (a-b+math.pi)%TAU-math.pi
 
 
+def slew_aim(actual,command,stats,seconds):
+    """Bounded torso response toward this command; not a tick-order claim."""
+    yaw=actual[0]+max(-stats.get("turn_rate",4)*seconds,min(stats.get("turn_rate",4)*seconds,angle_delta(command[0],actual[0])))
+    pitch=actual[1]+max(-stats.get("pitch_rate",3)*seconds,min(stats.get("pitch_rate",3)*seconds,command[1]-actual[1]))
+    return [angle_delta(yaw,0),max(stats.get("min_pitch",-.7),min(stats.get("max_pitch",1.3),pitch))]
+
+
 def unit(x,y):
     size=math.hypot(x,y)
     return [x/size,y/size] if size>1e-8 else [0.0,0.0]
@@ -37,7 +44,7 @@ def intercept(origin,target,velocity,speed):
 
 
 class Bot:
-    name="Snowy-Provision-v10"
+    name="Snowy-Trigger-v11"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -61,8 +68,6 @@ class Bot:
         self.last_dealt=-100
         self.burst_id=None
         self.burst_until=-100
-        self.economy_target=None
-        self.looting=False
         gc.collect();gc.disable()
 
     def secondary(self,me):
@@ -114,43 +119,6 @@ class Bot:
             cluster=sum(enemy["id"]!=target["id"] and math.dist(enemy["pos"][:2],target["pos"][:2])<weapon["stats"].get("chain_range",14) for enemy in nearby)
             if cluster<2:return False
         return all(abs(angle_delta(math.atan2(enemy["pos"][1]-me["pos"][1],enemy["pos"][0]-me["pos"][0]),yaw))<front for enemy in nearby)
-
-    def opening_goal(self,obs,enemies):
-        """Short bounded acquisition phase, yielding to immediate threats/zone."""
-        me=obs["self"];x,y,z=me["pos"];zone=obs["zone"]
-        if obs["t"]>65 or self.secondary(me) is not None or me["hp"]<.55*me["max_hp"]:return None
-        nearest=min((math.dist(enemy["pos"][:2],(x,y)) for enemy in enemies),default=1e9)
-        if any(enemy.get("hp",1400)<300 and math.dist(enemy["pos"][:2],(x,y))<160 for enemy in enemies):return None
-        if nearest<70 or len([enemy for enemy in enemies if math.dist(enemy["pos"][:2],(x,y))<145])>2:return None
-        def safe(point):
-            if abs(point[2]-z)>4 or math.dist(point[:2],zone["center"])>zone["radius"]-12:return False
-            travel=math.dist(point[:2],(x,y))
-            escape=max(0,math.dist(point[:2],zone["next_center"])-zone["next_radius"]+16)
-            if (travel+escape)/me["stats"].get("walk_speed",11.7)+12>zone["shrink_end"]-obs["t"]:return False
-            return all(math.dist(point[:2],enemy["pos"][:2])>=max(55,min(95,math.dist(enemy["pos"][:2],(x,y))-10)) for enemy in enemies)
-        pickups=[]
-        for pickup,_ in self.loot_memory.values():
-            distance=math.dist(pickup["pos"][:2],(x,y))
-            if pickup["kind"]!="gun" and distance<175 and safe(pickup["pos"]):
-                pickups.append((distance*(.75 if pickup["kind"]=="lightning" else 1),pickup))
-        if pickups:
-            _,pickup=min(pickups,key=lambda item:item[0]);self.looting=True
-            return pickup["pos"][:2]
-        # Do not start a farm duel while a nearby player is threatening us.
-        if nearest<110:return None
-        farms=[]
-        for item in obs["crates"]+[drone for drone in obs["mechs"] if drone["kind"]=="npc"]:
-            distance=math.dist(item["pos"][:2],(x,y))
-            npc=item.get("kind")=="npc"
-            if distance<(75 if npc else 65) and safe(item["pos"]):
-                farms.append((distance+(8 if npc else 12),item))
-        if farms:
-            _,item=min(farms,key=lambda pair:pair[0]);self.economy_target=item
-            if item.get("kind")=="npc":
-                direction=unit(x-item["pos"][0],y-item["pos"][1])
-                return [item["pos"][0]+direction[0]*18,item["pos"][1]+direction[1]*18]
-            return item["pos"][:2]
-        return None
 
     def choose_upgrade(self,offer,me):
         priority={"nanites":8,"servos":8,"armor":9,"plating":8.5,"jets":8,
@@ -218,7 +186,6 @@ class Bot:
         urgent=(not me["in_zone"] or zone["next_radius"]<65 or
                 (outside_next>0 and zone["shrink_end"]-obs["t"]<outside_next/me["stats"].get("walk_speed",11.7)+9))
         self.combat_target=None
-        self.economy_target=None;self.looting=False
         if urgent:return self.retreat_goal(obs,enemies)
         nearby=[enemy for enemy in enemies if math.dist(enemy["pos"][:2],(x,y))<145]
         target=min(enemies,key=lambda enemy:self.target_score(enemy,me)) if enemies else None
@@ -234,8 +201,6 @@ class Bot:
                 if drop["lands_in"]<6 and math.dist(drop["pos"][:2],(x,y))<110:
                     if all(math.dist(enemy["pos"][:2],drop["pos"][:2])>85 for enemy in enemies):return drop["pos"][:2]
             return self.retreat_goal(obs,enemies)
-        provision=self.opening_goal(obs,enemies)
-        if provision is not None:return provision
         resources=[]
         for cube,_ in self.cube_memory.values():
             d=math.dist(cube["pos"][:2],(x,y))
@@ -317,7 +282,6 @@ class Bot:
         weapon=self.secondary(me)
         if duel and weapon and weapon["kind"]=="lightning":
             boost=me["energy"]>65 and math.dist(duel["pos"][:2],(x,y))>self.combat_range+25
-        if self.looting:boost=me["energy"]>60 and math.dist((x,y),self.goal)>20
         if self.burst_id is not None and weapon and nearest<weapon["stats"].get("range",45)+10 and me["in_zone"]:
             boost=False
         if not me["in_zone"]:boost=me["energy"]>8
@@ -387,17 +351,12 @@ class Bot:
                 score=self.target_score(enemy,me)
                 if enemy.get("charging"):score-=20
                 targets.append((score,enemy,center))
-        if self.economy_target and not regen and not any(math.dist(enemy["pos"][:2],(x,y))<70 or (enemy.get("hp",1400)<300 and math.dist(enemy["pos"][:2],(x,y))<160) for enemy in enemies):
-            item=next((item for item in obs["crates"]+obs["mechs"] if item["id"]==self.economy_target["id"]),None)
-            if item:
-                center=[item["pos"][0],item["pos"][1],item["pos"][2]+(self.config["npc"].get("height",3.5)*.5 if item.get("kind")=="npc" else 1.2)]
-                if self.world.clear_ray(origin,center):targets.append((-200,item,center))
         if not targets and not enemies and not regen:
             for drone in obs["mechs"]:
                 if drone["kind"]!="npc":continue
                 distance=math.dist(drone["pos"][:2],(x,y))
                 center=[drone["pos"][0],drone["pos"][1],drone["pos"][2]+self.config["npc"].get("height",3.5)*.5]
-                if distance<115 and self.world.clear_ray(origin,center):targets.append((distance*.8,drone,center))
+                if 48<distance<115 and self.world.clear_ray(origin,center):targets.append((distance*.8,drone,center))
             for crate in obs["crates"]:
                 distance=math.dist(crate["pos"][:2],(x,y))
                 if distance<80 and abs(crate["pos"][2]-z)<15:
@@ -456,6 +415,14 @@ class Bot:
                 gun_yaw=math.atan2(gunpoint[1]-y,gunpoint[0]-x)
                 gun_pitch=math.atan2(gunpoint[2]-origin[2],math.dist(gunpoint[:2],(x,y)))
                 gun_aligned=abs(angle_delta(gun_yaw,me["aim"][0]))<tolerance and abs(gun_pitch-me["aim"][1])<tolerance*1.5
+                if not gun_aligned and primary in ("gun","lightning"):
+                    # The trigger is held while the torso slews. Comparing
+                    # only last observation's aim can starve a trackable
+                    # transverse target indefinitely. Allow one physics tick
+                    # of movement toward the actual aim command; keep the
+                    # existing gate unchanged for laser/mortar multiplexing.
+                    future=slew_aim(me["aim"],[yaw,pitch],stats,1/max(1,self.config["match"].get("tick_hz",20)))
+                    gun_aligned=abs(angle_delta(gun_yaw,future[0]))<tolerance and abs(gun_pitch-future[1])<tolerance*1.5
                 fire[i]=distance<ws.get("range",230) and gun_aligned
                 reload=weapon.get("ammo",0)<=0
             elif kind=="laser":
