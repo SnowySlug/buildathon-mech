@@ -1,54 +1,51 @@
-# Snowy Assault v5
+# Snowy Hybrid v6
 
-Offensive/resource-snowball experiment for Mech Royale. It uses the best v1
-ground map/pathfinding code without rooftop behavior or the v2 stronger-retreat
-policy. Gameplay improvement requires official practice scoring.
+An offensive Mech Royale experiment derived from Snowy Assault v5. V5 received
+4.00 official practice placement points. V6 has no measured gameplay score yet.
 
-The hypothesis is that the coordinated practice house bots rarely eliminate
-each other, so survival alone is insufficient: favorable early eliminations
-must turn into cube, damage, health and upgrade advantages.
+The hypothesis is that a lightning/gun hybrid should use its range upgrades,
+align both weapons with one compatible aim, and preserve energy for arc shots.
+The official protocol gives lightning45m range, a30-degree yaw cone,3energy
+per shot and a0.25s cooldown; weapon stats include applied upgrades.
 
-Behavior:
+Changes from V5:
 
-- Seek nearby secondary weapons and remember previously seen stationary loot.
-  Prefer lightning, including swaps that preserve the gun.
-- Commit to collecting nearby dropped cubes; approach isolated farm targets
-  rather than destroying them at range and abandoning their rewards.
-- Focus finishable pursuers. Against a small group, orbit around34m with
-  lightning or76m with only the gun. Increase distance when surrounded.
-- Fire compatible gun and lightning shots together; retain lightning firing
-  energy instead of spending it all on boost during an in-range duel.
-- Prioritize offensive upgrades. Healing is an explicit disengagement mode;
-  taking damage interrupts it and restores defense.
-- Zone urgency overrides resource collection and combat positioning.
+- Use90% of current lightning range, capped4m inside its boundary, rather than
+  keeping a fixed34m orbit after range upgrades. With54m range this gives48.6m,
+  beyond a default45m enemy arc. With depleted energy use gun standoff unless
+  finishing a weak enemy.
+- Lead the gun while firing lightning. The arc checks the current target yaw
+  independently, allowing both weapons against transverse moving targets.
+- Preserve arc energy while approaching resources as well as during a duel.
+- Count nearby tracked enemies as crossfire threats when their incoming line
+  of sight is clear or unknown. Known occluded enemies do not force the90m
+  crowd-retreat distance merely because the protocol tracks them behind cover.
+- Apply soft CPU deadlines to legacy navigation and geometric checks. Budget
+  exhaustion produces unknown line of sight: it authorizes neither firing nor
+  claims of safe cover. A* returns its best partial route. The map/path/ray
+  algorithms otherwise remain those of V5. Collect cyclic garbage during
+  initialization, leaving acyclic runtime data to reference counting.
 
-The idealized weapon arithmetic in `weapon_model.py` is NOT a match simulator.
-With perfect hits on one unarmored1400HP target, default gun-only kill time is
-11.76–12.24s depending on empty-mag reload event ordering; gun+lightning reaches
-it at3.50s using45lightningenergy. Two cubes plus one15%gun-damage upgrade reaches
-it at2.75s in that same idealization. Continuous boosting plus15arcshots during
-3.5s would cost104.5energy, exceeding the initial100: conserving duel energy is
-therefore an explicit policy. Real aim, cover, armor, movement, multiple enemies,
-loot access and damage timing are excluded from that model.
+Validation:17 local tests pass. The official recorded checker passed300
+observations:299timely,1late, no stale/wrong-tick/bad actions; p9928.6ms,
+max77.5ms. The checker and bot share the same one-CPU container. Direct bot
+computation on those300 recorded observations reached3.29ms CPU/3.29ms wall.
+A separate32-ground-pose test with15 tracked enemies reached26.88ms CPU,
+26.91ms wall and24.7MiB peak RSS after bounding work (previously152ms CPU).
+These are conformance and latency measurements, not reactive gameplay tests.
 
-Risks: closing distance can expose the mech to several coordinated shooters;
-loot pursuit can waste time or reveal position; NPC farming is not placement
-reward by itself; stationary loot may be taken by another mech; lightning drains
-energy and benefits from range/chain geometry. The final has competing-team
-free-for-all opponents, not the practice squad. No strength claim is inferred
-from conformance or ideal weapon arithmetic.
-
-Validation:10 tests pass, including focus selection, simultaneous gun+lightning,
-duel energy conservation, damage interrupting healing and safe secondary swaps.
-The official recorded checker passed300/300 observations with0late/stale/bad
-actions,ready1152ms,p9914.4ms,max24.0ms in the1CPU/512MB offline read-only Linux
-sandbox. Results depend on machine load and do not measure placement.
+Risks: wider orbit can reduce arc uptime; enemy upgrades are not fully visible;
+an occluded enemy can emerge quickly; budget exhaustion can miss a firing or
+movement opportunity. The legacy geometry remains approximate. Final opponents
+are competing bots rather than the coordinated practice house squad. Only an
+official evaluation can establish whether V6 improves placement.
 
 Publish these seven files at repository root: Dockerfile,.dockerignore,bot.py,
-navigation.py,mechfight.py,README.md,LICENSE. No arena data or package installs
-are required in the image; the scorer mounts /arena.
+navigation.py,mechfight.py,README.md,LICENSE. No package installs or arena data
+are required in the image; the scorer mounts /arena. Runtime is unprivileged,
+offline, read-only Linux/amd64 with1CPU,512MiB RAM and64MiB temporary space.
 
-MIT licensed. The wrapper derives from the organizer kit with fail-fast
-initialization. Our bot/navigation/strategy code was built with AI assistance
+MIT licensed. The protocol wrapper derives from the organizer kit with
+fail-fast initialization. Bot/navigation code was built with AI assistance
 during the event. Official protocol/map/checker:
 https://www.joinbuilders.org/buildathon/tracks/builders .

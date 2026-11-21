@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 import sys
+import time
 
 
 def inside(x, y, ring):
@@ -117,6 +118,8 @@ class World:
         best = start
         visited = 0
         while heap and visited < limit:
+            if visited % 32 == 0 and self.expired():
+                break
             _,cost,n = heapq.heappop(heap)
             if cost != costs[n]:
                 continue
@@ -158,10 +161,12 @@ class World:
         return found
 
     def free(self,x,y,z,radius=2.5,height=9,step_up=1.2):
+        if self.expired():return False
         b=self.bounds
         if x<b["minX"]+radius or x>b["maxX"]-radius or y<b["minY"]+radius or y>b["maxY"]-radius:
             return False
         for n in self.candidates(x,y,radius+1):
+            if self.expired():return False
             p=self.prisms[n]
             if p["top"]<=z+step_up or p["base"]>=z+height+.1:
                 continue
@@ -170,7 +175,13 @@ class World:
                     return False
         return True
 
+    def expired(self):
+        deadline=getattr(self,"geometry_deadline",None)
+        return deadline is not None and time.process_time()>=deadline
+
     def clear_ray(self,a,b):
+        # None means budget exhausted, never evidence of cover or a clear shot.
+        if self.expired():return None
         dx,dy,dz=b[0]-a[0],b[1]-a[1],b[2]-a[2]
         found=set()
         steps=max(1,int(math.hypot(dx,dy)/24)+1)
@@ -178,11 +189,13 @@ class World:
             f=k/steps
             found.update(self.candidates(a[0]+dx*f,a[1]+dy*f))
         for n in found:
+            if self.expired():return None
             p=self.prisms[n]
             if max(a[2],b[2])<p["base"] or min(a[2],b[2])>p["top"]:
                 continue
             hits=[0.0,1.0]
             for ring in [p["ring"],*p.get("holes",[])]:
+                if self.expired():return None
                 x0,y0=ring[-2:]
                 for i in range(0,len(ring),2):
                     x1,y1=ring[i:i+2]
@@ -197,6 +210,7 @@ class World:
                     x0,y0=x1,y1
             hits.sort()
             for left,right in zip(hits,hits[1:]):
+                if self.expired():return None
                 t=(left+right)/2
                 x,y,z=a[0]+dx*t,a[1]+dy*t,a[2]+dz*t
                 if p["base"]<=z<=p["top"] and inside(x,y,p["ring"]) and not any(inside(x,y,h) for h in p.get("holes",[])):
