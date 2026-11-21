@@ -2,10 +2,8 @@
 
 import math
 import random
-import time
 import mechfight as mf
 from navigation import World
-from roof import RoofController
 
 TAU=2*math.pi
 
@@ -36,8 +34,29 @@ def intercept(origin,target,velocity,speed):
     return [target[i]+velocity[i]*t for i in range(3)]
 
 
+
+def covered_reload(bot,obs,enemies):
+    """Refill during known disengagement, never merely because range >100m."""
+    me=obs["self"]
+    gun=next((weapon for weapon in me["weapons"] if weapon and weapon["kind"]=="gun"),None)
+    if gun is None or gun.get("reload",0)>0:return False
+    ammo=gun.get("ammo",0);mag=gun["stats"].get("mag",12)
+    if ammo<=0:return True
+    if ammo>=mag:return False
+    if not enemies:return True
+    if ammo>mag/2:return False
+    nearest=min(math.dist(enemy["pos"][:2],me["pos"][:2]) for enemy in enemies)
+    if nearest<60 and ammo>2:return False
+    origin=[*me["pos"][:2],me["pos"][2]+me["stats"].get("muzzle_height",7)]
+    for enemy in enemies:
+        center=[*enemy["pos"][:2],enemy["pos"][2]+4.5*(1+.05*enemy.get("cubes",0))]
+        if math.dist(origin,center)<=gun["stats"].get("range",230):
+            # Unknown geometry after a work budget is not proof of cover.
+            if bot.world.clear_ray(origin,center) is not False:return False
+    return True
+
 class Bot:
-    name="Snowy-Perch-v3"
+    name="Snowy-Tactics-G4"
 
     def __init__(self,hello):
         self.config=hello["config"]
@@ -50,9 +69,6 @@ class Bot:
         self.last_position=None
         self.stuck=0
         self.history={}
-        self.previous_move=[0,0]
-        self.target_id=None
-        self.roof_controller=RoofController(self.world,self.config)
 
     def choose_upgrade(self,offer,me):
         priority={"nanites":11,"servos":10,"armor":9,"plating":8.5,"jets":8,
@@ -64,7 +80,6 @@ class Bot:
         return max(range(len(offer["choices"])),key=lambda i:priority.get(offer["choices"][i]["id"],3))
 
     def strategic_goal(self,obs,enemies):
-        if self.roof_controller.active_goal is not None:return self.roof_controller.active_goal
         me=obs["self"];x,y,z=me["pos"];zone=obs["zone"]
         center=zone["next_center"];radius=zone["next_radius"]
         # Use the next safe area early; little time is available in late phases.
@@ -113,22 +128,10 @@ class Bot:
         return goal
 
     def move(self,obs,enemies):
-        command=self.roof_controller.command(obs,enemies)
-        if command is not None:
-            self.previous_move=command["move"]
-            self.last_position=obs["self"]["pos"][:2]
-            self.stuck=0
-            return command["move"],command["boost"],command["jump"]
-        desired_goal=self.roof_controller.active_goal
-        if desired_goal is not None and (self.goal is None or math.dist(desired_goal,self.goal)>8):self.plan_at=-100
-        return self.ground_move(obs,enemies)
-
-    def ground_move(self,obs,enemies):
         me=obs["self"];x,y,z=me["pos"];stats=me["stats"]
         if self.last_position is not None:
             moved=math.dist(me["pos"][:2],self.last_position)
-            trying=math.hypot(*self.previous_move)>.5
-            self.stuck=self.stuck+.1 if trying and moved<.13 else max(0,self.stuck-.2)
+            self.stuck=self.stuck+.1 if moved<.13 else max(0,self.stuck-.2)
         self.last_position=me["pos"][:2]
         if obs["t"]>=self.plan_at:
             self.goal=self.strategic_goal(obs,enemies)
@@ -187,7 +190,6 @@ class Bot:
             jump=me["grounded"];boost=True
         elif nearest<85 and me["energy"]>55 and int(obs["t"]*10)%24==0:
             jump=me["grounded"]
-        self.previous_move=chosen
         return chosen,boost,jump
 
     def aim_fire(self,obs,enemies):
@@ -195,21 +197,12 @@ class Bot:
         origin=[x,y,z+stats.get("muzzle_height",7)]
         targets=[]
         regen=me["hp"]<.65*me["max_hp"]
-        for enemy in sorted(enemies,key=lambda e:math.dist(e["pos"][:2],(x,y))-(40 if e["id"]==self.target_id else 0)):
+        for enemy in enemies:
             distance=math.dist(enemy["pos"][:2],(x,y))
             if distance>290 or (regen and distance>85):continue
             center=[enemy["pos"][0],enemy["pos"][1],enemy["pos"][2]+4.5*(1+.05*enemy.get("cubes",0))]
-            horizontal=math.dist(center[:2],(x,y))
-            low=origin[2]+math.tan(stats.get("min_pitch",-.7))*horizontal
-            high=origin[2]+math.tan(stats.get("max_pitch",1.3))*horizontal
-            target_height=self.config["mech"].get("height",9)*(1+self.config["cubes"].get("size_per_cube",.05)*enemy.get("cubes",0))
-            reachable_low=max(low,enemy["pos"][2]+.7)
-            reachable_high=min(high,enemy["pos"][2]+target_height-.5)
-            if reachable_low>reachable_high:continue
-            center[2]=max(reachable_low,min(reachable_high,center[2]))
             if self.world.clear_ray(origin,center):
                 score=distance+max(0,enemy.get("hp",1400)-400)*.025
-                if enemy["id"]==self.target_id:score-=40
                 if enemy.get("charging"):score-=20
                 targets.append((score,enemy,center))
         if not targets and not enemies and not regen:
@@ -224,20 +217,18 @@ class Bot:
                 enemy=min(enemies,key=lambda e:math.dist(e["pos"][:2],(x,y)))
                 yaw=math.atan2(enemy["pos"][1]-y,enemy["pos"][0]-x)
             else:yaw=self.phase+obs["t"]*.7
-            return [yaw,0.0],[False,False],False
+            return [yaw,0.0],[False,False],covered_reload(self,obs,enemies)
         _,target,center=min(targets,key=lambda item:item[0])
-        self.target_id=target["id"]
         velocity=target.get("vel",[0,0,0])
         distance=math.dist(center,origin)
         weapons=me["weapons"]
         secondary=next(((i,w) for i,w in enumerate(weapons) if w and w["kind"]!="gun"),None)
-        gunpoint=intercept(origin,center,velocity,next((w["stats"].get("speed",252) for w in weapons if w and w["kind"]=="gun"),252))
-        aimpoint=gunpoint
+        aimpoint=intercept(origin,center,velocity,next((w["stats"].get("speed",252) for w in weapons if w and w["kind"]=="gun"),252))
         primary="gun"
         pitch=None
         if secondary:
             slot,weapon=secondary;kind=weapon["kind"];ws=weapon["stats"]
-            if kind=="laser" and distance<ws.get("range",280) and (weapon.get("charge",0)>0 or (weapon["cooldown"]<=.05 and distance>65)):
+            if kind=="laser" and distance<ws.get("range",280) and (weapon.get("charge",0)>0 or weapon["cooldown"]<=.05):
                 primary="laser";aimpoint=center
             elif kind=="lightning" and distance<ws.get("range",45):primary="lightning";aimpoint=center
             elif kind=="mortar" and 27<distance<230 and weapon["cooldown"]<=.05:
@@ -266,13 +257,8 @@ class Bot:
             ws=weapon["stats"];kind=weapon["kind"]
             aligned=error_yaw<tolerance and error_pitch<tolerance*1.5
             if kind=="gun":
-                gun_yaw=math.atan2(gunpoint[1]-y,gunpoint[0]-x)
-                gun_pitch=math.atan2(gunpoint[2]-origin[2],math.dist(gunpoint[:2],(x,y)))
-                gun_aligned=abs(angle_delta(gun_yaw,me["aim"][0]))<tolerance and abs(gun_pitch-me["aim"][1])<tolerance*1.5
-                # Both guns can fire while a laser charges when their own
-                # intercept solution matches the actual turret orientation.
-                fire[i]=distance<ws.get("range",230) and gun_aligned
-                reload=weapon.get("ammo",0)<=0 or (weapon.get("ammo",0)<3 and distance>100)
+                fire[i]=primary=="gun" and distance<ws.get("range",230) and aligned
+                reload=weapon.get("ammo",0)<=0
             elif kind=="laser":
                 charge=weapon.get("charge",0)
                 fire[i]=primary=="laser" and (charge<ws.get("charge",.75) or not aligned)
@@ -282,28 +268,16 @@ class Bot:
         return [yaw,pitch],fire,reload
 
     def act(self,obs):
-        # Shared across roof scoring and targeting. An exhausted LOS query is
-        # unknown, never evidence of safe cover, and never authorizes a shot.
-        self.world.geometry_deadline=time.process_time()+.010
         me=obs["self"]
         enemies=[enemy for enemy in obs["mechs"] if enemy["kind"]=="mech"]
         movement,boost,jump=self.move(obs,enemies)
-        # Reserve an independent targeting slice so a difficult cover plan
-        # cannot consume the entire frame and suppress otherwise safe shots.
-        self.world.geometry_deadline=time.process_time()+.004
         aim,fire,reload=self.aim_fire(obs,enemies)
-        if self.roof_controller.hold_fire:fire=[False,False]
-        if self.roof_controller.stage in ("climb","transfer","land"):
-            # Laser charging halves horizontal movement during a transfer.
-            for slot,weapon in enumerate(me["weapons"]):
-                if weapon and weapon["kind"]=="laser":fire[slot]=False
         act={"tick":obs["tick"],"move":movement,"aim":aim,"boost":boost,"jump":jump,"fire":fire,"reload":reload}
         if obs.get("offer"):act["pick"]=self.choose_upgrade(obs["offer"],me)
         for pickup in sorted(obs["pickups"],key=lambda p:math.dist(p["pos"][:2],me["pos"][:2])):
-            if me["weapons"][1] is None and pickup["kind"] in ("laser","lightning"):
+            if me["weapons"][1] is None and pickup["kind"]!="gun":
                 if math.dist(pickup["pos"][:2],me["pos"][:2])<=self.config["loot"]["pickup_radius"] and abs(pickup["pos"][2]-me["pos"][2])<=4:
                     act["take"]=pickup["id"];break
-        self.world.geometry_deadline=None
         return act
 
 
